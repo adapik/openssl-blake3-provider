@@ -1,0 +1,3 @@
+LIBRARY blake3
+EXPORTS
+    OSSL_provider_init

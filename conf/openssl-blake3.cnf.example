@@ -1,0 +1,21 @@
+# Keep "default" active, otherwise OpenSSL loses its normal algorithms.
+#
+# The module file (blake3.so / blake3.dylib / blake3.dll) is found by the provider's *name*
+# ("blake3", the key in [provider_sect]) in the directory printed by `openssl version -m`, or in
+# $OPENSSL_MODULES. Do NOT write "module = blake3": "module" is a file path and, without the
+# extension, it is not found (verified on OpenSSL 3.5.9). Use a full path with extension if the
+# module lives outside those directories:   module = /opt/blake3/blake3.so
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+[provider_sect]
+default = default_sect
+blake3  = blake3_sect
+
+[default_sect]
+activate = 1
+
+[blake3_sect]
+activate = 1

@@ -1,0 +1,38 @@
+# build trees
+build*/
+cmake-build-*/
+out/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# objects / binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exp
+*.pdb
+
+# language tooling
+test/cross/rust_ref/target/
+test/cross/go_ref/go_ref
+__pycache__/
+*.pyc
+
+# editors / IDEs / local assistants
+.idea/
+.vscode/
+.vs/
+*.swp
+.claude/
+.DS_Store
+
+# local scratch (cross-test workdirs, fuzz corpora/crashes)
+b3cross_*/
+corpus/
+crash-*
+leak-*

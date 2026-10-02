@@ -1,0 +1,171 @@
+# NOTE: written alongside the code but NOT executed in the authoring environment (no GitHub runners there).
+# Everything the jobs invoke (cmake targets, ctest, cli_test.sh, run_cross.py, big_stream.sh) was run locally on
+# Linux x86_64 against OpenSSL 3.5.9 and 4.0.3; the macOS / Windows / aarch64 jobs have never run.
+name: ci
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"   # nightly: long fuzz + 4 GiB stream
+env:
+  OSSL_35: "3.5.9"
+  OSSL_40: "4.0.3"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64-gcc,   os: ubuntu-24.04,    cc: gcc,   generator: Ninja }
+          - { name: linux-x86_64-clang, os: ubuntu-24.04,    cc: clang, generator: Ninja }
+          - { name: linux-aarch64-gcc,  os: ubuntu-24.04-arm, cc: gcc,  generator: Ninja }
+          - { name: macos-arm64,        os: macos-14,        cc: clang, generator: Ninja }
+          - { name: macos-x86_64,       os: macos-15-intel,  cc: clang, generator: Ninja }
+          - { name: windows-x64-msvc,   os: windows-2022,    cc: cl,    generator: "Visual Studio 17 2022" }
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: tools (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update && sudo apt-get install -y ninja-build clang; else brew install ninja; fi
+          pip3 install --break-system-packages blake3 2>/dev/null || pip3 install blake3
+      - name: cache OpenSSL builds
+        id: ossl-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ossl
+          key: ossl-${{ matrix.os }}-${{ env.OSSL_35 }}-${{ env.OSSL_40 }}-v1
+      - name: build OpenSSL 3.5 and 4.0 (unix)
+        if: runner.os != 'Windows' && steps.ossl-cache.outputs.cache-hit != 'true'
+        run: |
+          sh ci/build_openssl.sh $OSSL_35 $HOME/ossl/3.5
+          sh ci/build_openssl.sh $OSSL_40 $HOME/ossl/4.0
+      - name: build OpenSSL 3.5 and 4.0 (windows)
+        if: runner.os == 'Windows' && steps.ossl-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Import-Module "$env:VSINSTALLDIR\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $env:VSINSTALLDIR -DevCmdArguments "-arch=x64" -SkipAutomaticLocation
+          ./ci/build_openssl.ps1 $env:OSSL_35 "$env:USERPROFILE\ossl\3.5"
+          ./ci/build_openssl.ps1 $env:OSSL_40 "$env:USERPROFILE\ossl\4.0"
+
+      # ---- ONE provider binary, built against the 3.5 headers only ----
+      - name: build provider + tests against 3.5 (unix)
+        if: runner.os != 'Windows'
+        run: |
+          CC=${{ matrix.cc }} cmake -S . -B build35 -G Ninja -DBLAKE3_PROV_BUILD_TESTS=ON \
+            -DOPENSSL_INCLUDE_DIR=$HOME/ossl/3.5/include \
+            -DOPENSSL_CRYPTO_LIBRARY=$(ls $HOME/ossl/3.5/lib/libcrypto.{so,dylib} 2>/dev/null | head -1)
+          cmake --build build35 -j
+      - name: build provider + tests against 3.5 (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build35 -G "${{ matrix.generator }}" -A x64 -DBLAKE3_PROV_BUILD_TESTS=ON `
+            -DOPENSSL_INCLUDE_DIR="$env:USERPROFILE\ossl\3.5\include" -DOPENSSL_CRYPTO_LIBRARY="$env:USERPROFILE\ossl\3.5\lib\libcrypto.lib"
+          cmake --build build35 --config Release -j
+      - name: ctest vs OpenSSL 3.5
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then export PATH="$USERPROFILE/ossl/3.5/bin:$PATH"; ctest --test-dir build35 -C Release --output-on-failure
+          else export LD_LIBRARY_PATH=$HOME/ossl/3.5/lib DYLD_LIBRARY_PATH=$HOME/ossl/3.5/lib; ctest --test-dir build35 --output-on-failure; fi
+
+      # ---- same module binary, loaded by OpenSSL 4.0 (tests compiled against 4.0 headers/libs) ----
+      - name: build tests against 4.0 using the 3.5-built module
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            MOD=$(pwd)/build35/Release/blake3.dll; INC="$USERPROFILE/ossl/4.0/include"; LIB="$USERPROFILE/ossl/4.0/lib/libcrypto.lib"; GEN="-G \"Visual Studio 17 2022\" -A x64"
+            cmake -S . -B build40 -G "Visual Studio 17 2022" -A x64 -DBLAKE3_PROV_BUILD_TESTS=ON -DOPENSSL_INCLUDE_DIR="$INC" -DOPENSSL_CRYPTO_LIBRARY="$LIB" -DBLAKE3_PROV_PREBUILT_MODULE="$MOD"
+            cmake --build build40 --config Release -j
+          else
+            MOD=$(ls $(pwd)/build35/blake3.{so,dylib} 2>/dev/null | head -1)
+            CC=${{ matrix.cc }} cmake -S . -B build40 -G Ninja -DBLAKE3_PROV_BUILD_TESTS=ON -DOPENSSL_INCLUDE_DIR=$HOME/ossl/4.0/include \
+              -DOPENSSL_CRYPTO_LIBRARY=$(ls $HOME/ossl/4.0/lib/libcrypto.{so,dylib} 2>/dev/null | head -1) -DBLAKE3_PROV_PREBUILT_MODULE=$MOD
+            cmake --build build40 -j
+          fi
+      - name: ctest vs OpenSSL 4.0
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then export PATH="$USERPROFILE/ossl/4.0/bin:$PATH"; ctest --test-dir build40 -C Release --output-on-failure
+          else export LD_LIBRARY_PATH=$HOME/ossl/4.0/lib DYLD_LIBRARY_PATH=$HOME/ossl/4.0/lib; ctest --test-dir build40 --output-on-failure; fi
+      - name: CLI integration, both OpenSSL versions
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then MOD=$(pwd)/build35/Release/blake3.dll; EXT=.exe; else MOD=$(ls $(pwd)/build35/blake3.{so,dylib} | head -1); EXT=; fi
+          for v in 3.5 4.0; do
+            if [ "$RUNNER_OS" = Windows ]; then export PATH="$USERPROFILE/ossl/$v/bin:$PATH"; else export LD_LIBRARY_PATH=$HOME/ossl/$v/lib DYLD_LIBRARY_PATH=$HOME/ossl/$v/lib; fi
+            sh test/cli_test.sh "$([ "$RUNNER_OS" = Windows ] && echo $USERPROFILE || echo $HOME)/ossl/$v/bin/openssl$EXT" "$MOD"
+          done
+      - name: windows module deps/exports
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          dumpbin /dependents build35\Release\blake3.dll | findstr /i "libcrypto libssl" && exit 1 || echo no libcrypto dependency
+          dumpbin /exports build35\Release\blake3.dll
+
+  # Linux-only deep checks: sanitizers, cross-implementation, big stream, fuzz
+  deep-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build clang valgrind
+          pip3 install --break-system-packages blake3 2>/dev/null || pip3 install blake3
+          cargo install b3sum
+      - uses: actions/cache@v4
+        with: { path: ~/ossl, key: "ossl-deep-${{ env.OSSL_35 }}-${{ env.OSSL_40 }}-v1" }
+      - run: |
+          sh ci/build_openssl.sh $OSSL_35 $HOME/ossl/3.5
+          sh ci/build_openssl.sh $OSSL_40 $HOME/ossl/4.0
+      - name: ASan+UBSan build and ctest
+        run: |
+          cmake -S . -B basan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=undefined -O1 -g" \
+            -DBLAKE3_PROV_BUILD_TESTS=ON -DOPENSSL_INCLUDE_DIR=$HOME/ossl/3.5/include -DOPENSSL_CRYPTO_LIBRARY=$HOME/ossl/3.5/lib/libcrypto.so
+          cmake --build basan -j && LD_LIBRARY_PATH=$HOME/ossl/3.5/lib ctest --test-dir basan --output-on-failure
+      - name: TSan thread test
+        run: |
+          cmake -S . -B btsan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=thread -O1 -g" \
+            -DBLAKE3_PROV_BUILD_TESTS=ON -DOPENSSL_INCLUDE_DIR=$HOME/ossl/3.5/include -DOPENSSL_CRYPTO_LIBRARY=$HOME/ossl/3.5/lib/libcrypto.so
+          cmake --build btsan -j
+          LD_LIBRARY_PATH=$HOME/ossl/3.5/lib B3_MODULE_DIR=$PWD/btsan setarch x86_64 -R ./btsan/test/test_threads
+      - name: valgrind memcheck
+        run: |
+          cmake -S . -B bplain -G Ninja -DBLAKE3_PROV_BUILD_TESTS=ON -DOPENSSL_INCLUDE_DIR=$HOME/ossl/3.5/include -DOPENSSL_CRYPTO_LIBRARY=$HOME/ossl/3.5/lib/libcrypto.so
+          cmake --build bplain -j
+          export LD_LIBRARY_PATH=$HOME/ossl/3.5/lib B3_MODULE_DIR=$PWD/bplain B3_VECTORS=$PWD/test/vectors/test_vectors.json
+          for t in spec_traces test_vectors test_evp; do valgrind --error-exitcode=9 --leak-check=full ./bplain/test/$t; done
+      - name: cross-implementation (10000 cases, 5 references)
+        run: |
+          (cd test/cross/go_ref && go build -o $PWD/../../../go_ref .)
+          (cd test/cross/rust_ref && cargo build --release)
+          LD_LIBRARY_PATH=$HOME/ossl/3.5/lib python3 test/cross/run_cross.py --cases 10000 --oracle-cases 500 --cli-cases 300 \
+            --eval-provider bplain/test/eval_provider --module-dir $PWD/bplain --openssl $HOME/ossl/3.5/bin/openssl \
+            --b3sum $(which b3sum) --rust-ref test/cross/rust_ref/target/release/rust_ref --go-ref ./go_ref
+      - name: fuzz (libFuzzer, clang) - 2 min on PRs, 30 min nightly
+        run: |
+          CC=clang cmake -S . -B bfuzz -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBLAKE3_PROV_BUILD_TESTS=ON -DOPENSSL_INCLUDE_DIR=$HOME/ossl/3.5/include -DOPENSSL_CRYPTO_LIBRARY=$HOME/ossl/3.5/lib/libcrypto.so
+          cmake --build bfuzz -j
+          SECS=120; [ "${{ github.event_name }}" = schedule ] && SECS=1800
+          mkdir -p corpus
+          LD_LIBRARY_PATH=$HOME/ossl/3.5/lib B3_MODULE_DIR=$PWD/bfuzz ./bfuzz/test/fuzz_ops_libfuzzer -max_total_time=$SECS -max_len=70000 corpus
+      - name: 4 GiB stream vs b3sum (nightly only)
+        if: github.event_name == 'schedule'
+        run: LD_LIBRARY_PATH=$HOME/ossl/3.5/lib sh test/big_stream.sh $HOME/ossl/3.5/bin/openssl $PWD/bplain $(which b3sum)
+
+  # AVX-512 coverage on runners whose CPU lacks it: Intel SDE (best effort)
+  avx512-sde:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          grep -q avx512f /proc/cpuinfo && echo "runner CPU has AVX-512 natively; the main job already covers it" || echo "no native AVX-512: tests log 'SKIP: requested backend avx512' (exit 77); wire Intel SDE here if required"

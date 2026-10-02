@@ -1,0 +1,40 @@
+--- a/c/blake3_dispatch.c	2026-10-02 19:05:24.313185553 +0300
++++ b/c/blake3_dispatch.c	2026-10-02 19:05:24.323066430 +0300
+@@ -46,6 +46,11 @@
+ 
+ #define MAYBE_UNUSED(x) (void)((x))
+ 
++#if BLAKE3_USE_NEON == 1
++/* b3prov: runtime switch so BLAKE3_PROV_FORCE_IMPL=portable works on aarch64 */
++extern int b3prov_neon_enabled;
++#endif
++
+ #if defined(IS_X86)
+ static uint64_t xgetbv(void) {
+ #if defined(_MSC_VER)
+@@ -289,9 +294,11 @@
+ #endif
+ 
+ #if BLAKE3_USE_NEON == 1
+-  blake3_hash_many_neon(inputs, num_inputs, blocks, key, counter,
+-                        increment_counter, flags, flags_start, flags_end, out);
+-  return;
++  if (b3prov_neon_enabled) {
++    blake3_hash_many_neon(inputs, num_inputs, blocks, key, counter,
++                          increment_counter, flags, flags_start, flags_end, out);
++    return;
++  }
+ #endif
+ 
+   blake3_hash_many_portable(inputs, num_inputs, blocks, key, counter,
+@@ -326,7 +333,9 @@
+ #endif
+ #endif
+ #if BLAKE3_USE_NEON == 1
+-  return 4;
++  if (b3prov_neon_enabled) {
++    return 4;
++  }
+ #endif
+   return 1;
+ }
