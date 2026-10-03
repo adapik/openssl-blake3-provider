@@ -3,10 +3,12 @@ set -u
 OSSL=$1; MOD=$2; HERE=$(cd "$(dirname "$0")" && pwd); CONF=${3:-$HERE/../conf/openssl-blake3.cnf.example}
 export OPENSSL_MODULES=$(dirname "$MOD")
 ORACLE="$HERE/oracle"; fail=0
+# native Windows python cannot read MSYS paths like /d/a/...; cygpath -m gives D:/a/...
+ORACLE_PY=$(cygpath -m "$ORACLE" 2>/dev/null || echo "$ORACLE")
 ok()  { echo "ok   - $1"; }
 bad() { echo "FAIL - $1"; fail=1; }
 eq()  { [ "$2" = "$3" ] && ok "$1" || { bad "$1"; echo "   got:  $2"; echo "   want: $3"; }; }
-orc() { python3 -c "import sys;sys.path.insert(0,'$ORACLE');import blake3_spec as b;$1"; }
+orc() { python3 -c "import sys;sys.path.insert(0,'$ORACLE_PY');import blake3_spec as b;$1"; }
 P="-provider blake3 -provider default"
 
 "$OSSL" version
@@ -23,7 +25,7 @@ eq "dgst IETF xoflen 131" "$got" "$(orc "print(b.hash_(b'IETF',131).hex())")"
 got=$(printf '' | "$OSSL" dgst $P -BLAKE3 -r | cut -d' ' -f1)
 eq "dgst empty" "$got" af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
 
-KEY=$(python3 -c "print('cc'*32)"); T=$(mktemp); head -c 2048 /dev/zero | tr '\0' '\252' >"$T"
+KEY=$(python3 -c "print('cc'*32)"); T=$(mktemp); python3 -c "import sys;sys.stdout.buffer.write(b'\xaa'*2048)" >"$T"
 got=$("$OSSL" mac $P -macopt hexkey:$KEY -in "$T" BLAKE3 | tr 'A-F' 'a-f')
 eq "mac keyed (2048xaa)" "$got" "$(orc "print(b.keyed_hash(bytes([0xcc])*32,bytes([0xaa])*2048).hex())")"
 got=$("$OSSL" mac $P -macopt hexkey:$KEY -macopt size:77 -in "$T" BLAKE3 | tr 'A-F' 'a-f')

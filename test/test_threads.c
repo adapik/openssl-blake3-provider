@@ -16,11 +16,20 @@ static int thr_start(thr_t *t, void *(*f)(void *), void *a) { return pthread_cre
 static void thr_join(thr_t t) { pthread_join(t, NULL); }
 #define THR_RET void *
 #define THR_OK NULL
-static pthread_barrier_t g_bar;
-static void barrier_wait(int n) { (void)n; pthread_barrier_wait(&g_bar); }
+/* macOS has no pthread_barrier_t: portable mutex+condvar barrier */
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
+static int g_ready;
+static void barrier_wait(int n) {
+  pthread_mutex_lock(&g_mu);
+  if (++g_ready >= n) pthread_cond_broadcast(&g_cv);
+  else while (g_ready < n) pthread_cond_wait(&g_cv, &g_mu);
+  pthread_mutex_unlock(&g_mu);
+}
 #endif
 
 #define NTHREADS 16
+static int g_n = NTHREADS; /* B3_THREADS=<n> overrides, for debugging */
 #define NOPS 10000
 static volatile int g_bad[NTHREADS];
 
@@ -28,7 +37,7 @@ static THR_RET worker(void *arg) {
   int id = (int)(intptr_t)arg, i;
   uint64_t s = 0x1234567 + (uint64_t)id * 7919;
   OSSL_LIB_CTX *lc = OSSL_LIB_CTX_new(); EVP_MD *md = NULL; EVP_MAC *mac = NULL; EVP_KDF *kdf = NULL; unsigned char *buf = malloc(5000), key[32]; OSSL_PROVIDER *pd, *pb;
-  barrier_wait(NTHREADS);
+  barrier_wait(g_n);
   OSSL_PROVIDER_set_default_search_path(lc, t_module_dir());
   pd = OSSL_PROVIDER_load(lc, "default"); pb = OSSL_PROVIDER_load(lc, "blake3");
   if (!pd || !pb) { g_bad[id] = 1; return THR_OK; }
@@ -54,13 +63,11 @@ static THR_RET worker(void *arg) {
 
 int main(void) {
   thr_t t[NTHREADS]; int i, bad = 0;
-  setvbuf(stdout, NULL, _IOLBF, 0);
-#ifndef _WIN32
-  pthread_barrier_init(&g_bar, NULL, NTHREADS);
-#endif
-  for (i = 0; i < NTHREADS; i++) if (!thr_start(&t[i], worker, (void *)(intptr_t)i)) return 1;
-  for (i = 0; i < NTHREADS; i++) thr_join(t[i]);
+  setvbuf(stdout, NULL, _IOLBF, 4096) /* MSVC rejects size 0 (fast-fail 0xc0000409) */;
+  { const char *e = getenv("B3_THREADS"); if (e && atoi(e) >= 1 && atoi(e) <= NTHREADS) g_n = atoi(e); }
+  for (i = 0; i < g_n; i++) if (!thr_start(&t[i], worker, (void *)(intptr_t)i)) return 1;
+  for (i = 0; i < g_n; i++) thr_join(t[i]);
   for (i = 0; i < NTHREADS; i++) bad += g_bad[i];
-  printf("test_threads: %d threads x %d ops, %d bad threads\n", NTHREADS, NOPS, bad);
+  printf("test_threads: %d threads x %d ops, %d bad threads\n", g_n, NOPS, bad);
   return bad != 0;
 }

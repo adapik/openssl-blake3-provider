@@ -47,7 +47,7 @@ foreach(impl auto portable sse2 sse41 avx2 avx512)
   endif()
   set_tests_properties(fuzz_quick.${impl} PROPERTIES ENVIRONMENT "${_e}" SKIP_RETURN_CODE 77)
 endforeach()
-if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE)   # Apple clang ships no libclang_rt.fuzzer
   add_executable(fuzz_ops_libfuzzer fuzz/fuzz_ops.c ref_blake3.c)
   target_compile_definitions(fuzz_ops_libfuzzer PRIVATE FUZZ_LIBFUZZER)
   target_include_directories(fuzz_ops_libfuzzer PRIVATE ${OPENSSL_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})

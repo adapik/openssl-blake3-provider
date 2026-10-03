@@ -2,6 +2,7 @@
 #include <string.h>
 #include "blake3.h"
 
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 extern int g_cpu_features;
 int get_cpu_features(void);
 
@@ -24,6 +25,19 @@ const char *up_force(void) {
   }
   return names[have];
 }
+#else
+/* Non-x86 stock build: upstream dispatch has no g_cpu_features. The patched blake3_dispatch.c references this
+   switch (normally defined in src/b3_dispatch_ext.c, which the stock library omits); stock = NEON always on. */
+int b3prov_neon_enabled = 1;
+
+const char *up_force(void) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+  return "neon";
+#else
+  return "portable";
+#endif
+}
+#endif
 
 void up_hash(const void *buf, size_t len, unsigned char *out, int chunked) {
   blake3_hasher h;
