@@ -4,6 +4,7 @@
 name: ci
 on:
   push:
+    branches: [master, main]   # other branches are covered by their pull_request run
   pull_request:
   schedule:
     - cron: "17 3 * * *"   # nightly: long fuzz + 4 GiB stream
@@ -35,7 +36,7 @@ jobs:
           pip3 install --break-system-packages blake3 2>/dev/null || pip3 install blake3
       - name: cache OpenSSL builds
         id: ossl-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/ossl
           key: ossl-${{ matrix.os }}-${{ env.OSSL_35 }}-${{ env.OSSL_40 }}-v1
@@ -44,14 +45,23 @@ jobs:
         run: |
           sh ci/build_openssl.sh $OSSL_35 $HOME/ossl/3.5
           sh ci/build_openssl.sh $OSSL_40 $HOME/ossl/4.0
+      - name: MSVC dev environment (windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with: { arch: x64 }
       - name: build OpenSSL 3.5 and 4.0 (windows)
         if: runner.os == 'Windows' && steps.ossl-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          Import-Module "$env:VSINSTALLDIR\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-          Enter-VsDevShell -VsInstallPath $env:VSINSTALLDIR -DevCmdArguments "-arch=x64" -SkipAutomaticLocation
           ./ci/build_openssl.ps1 $env:OSSL_35 "$env:USERPROFILE\ossl\3.5"
           ./ci/build_openssl.ps1 $env:OSSL_40 "$env:USERPROFILE\ossl\4.0"
+
+      - name: save OpenSSL builds
+        if: steps.ossl-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/ossl
+          key: ossl-${{ matrix.os }}-${{ env.OSSL_35 }}-${{ env.OSSL_40 }}-v1
 
       # ---- ONE provider binary, built against the 3.5 headers only ----
       - name: build provider + tests against 3.5 (unix)
@@ -71,7 +81,7 @@ jobs:
       - name: ctest vs OpenSSL 3.5
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = Windows ]; then export PATH="$USERPROFILE/ossl/3.5/bin:$PATH"; ctest --test-dir build35 -C Release --output-on-failure
+          if [ "$RUNNER_OS" = Windows ]; then export PATH="$(cygpath -u "$USERPROFILE")/ossl/3.5/bin:$PATH"; ctest --test-dir build35 -C Release --output-on-failure
           else export LD_LIBRARY_PATH=$HOME/ossl/3.5/lib DYLD_LIBRARY_PATH=$HOME/ossl/3.5/lib; ctest --test-dir build35 --output-on-failure; fi
 
       # ---- same module binary, loaded by OpenSSL 4.0 (tests compiled against 4.0 headers/libs) ----
@@ -83,7 +93,7 @@ jobs:
             cmake -S . -B build40 -G "Visual Studio 17 2022" -A x64 -DBLAKE3_PROV_BUILD_TESTS=ON -DOPENSSL_INCLUDE_DIR="$INC" -DOPENSSL_CRYPTO_LIBRARY="$LIB" -DBLAKE3_PROV_PREBUILT_MODULE="$MOD"
             cmake --build build40 --config Release -j
           else
-            MOD=$(ls $(pwd)/build35/blake3.{so,dylib} 2>/dev/null | head -1)
+            MOD=$(ls $(pwd)/build35/blake3.{so,dylib} 2>/dev/null | head -1 || true)
             CC=${{ matrix.cc }} cmake -S . -B build40 -G Ninja -DBLAKE3_PROV_BUILD_TESTS=ON -DOPENSSL_INCLUDE_DIR=$HOME/ossl/4.0/include \
               -DOPENSSL_CRYPTO_LIBRARY=$(ls $HOME/ossl/4.0/lib/libcrypto.{so,dylib} 2>/dev/null | head -1) -DBLAKE3_PROV_PREBUILT_MODULE=$MOD
             cmake --build build40 -j
@@ -91,14 +101,14 @@ jobs:
       - name: ctest vs OpenSSL 4.0
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = Windows ]; then export PATH="$USERPROFILE/ossl/4.0/bin:$PATH"; ctest --test-dir build40 -C Release --output-on-failure
+          if [ "$RUNNER_OS" = Windows ]; then export PATH="$(cygpath -u "$USERPROFILE")/ossl/4.0/bin:$PATH"; ctest --test-dir build40 -C Release --output-on-failure
           else export LD_LIBRARY_PATH=$HOME/ossl/4.0/lib DYLD_LIBRARY_PATH=$HOME/ossl/4.0/lib; ctest --test-dir build40 --output-on-failure; fi
       - name: CLI integration, both OpenSSL versions
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = Windows ]; then MOD=$(pwd)/build35/Release/blake3.dll; EXT=.exe; else MOD=$(ls $(pwd)/build35/blake3.{so,dylib} | head -1); EXT=; fi
+          if [ "$RUNNER_OS" = Windows ]; then MOD=$(pwd)/build35/Release/blake3.dll; EXT=.exe; else MOD=$(ls $(pwd)/build35/blake3.{so,dylib} 2>/dev/null | head -1 || true); EXT=; fi
           for v in 3.5 4.0; do
-            if [ "$RUNNER_OS" = Windows ]; then export PATH="$USERPROFILE/ossl/$v/bin:$PATH"; else export LD_LIBRARY_PATH=$HOME/ossl/$v/lib DYLD_LIBRARY_PATH=$HOME/ossl/$v/lib; fi
+            if [ "$RUNNER_OS" = Windows ]; then export PATH="$(cygpath -u "$USERPROFILE")/ossl/$v/bin:$PATH"; else export LD_LIBRARY_PATH=$HOME/ossl/$v/lib DYLD_LIBRARY_PATH=$HOME/ossl/$v/lib; fi
             sh test/cli_test.sh "$([ "$RUNNER_OS" = Windows ] && echo $USERPROFILE || echo $HOME)/ossl/$v/bin/openssl$EXT" "$MOD"
           done
       - name: windows module deps/exports
@@ -114,7 +124,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: stable }
+        with: { go-version: stable, cache-dependency-path: test/cross/go_ref/go.sum }
       - uses: dtolnay/rust-toolchain@stable
       - name: tools
         run: |
